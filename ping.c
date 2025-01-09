@@ -9,175 +9,193 @@
 #include <sys/time.h>
 #include <poll.h>
 #include <signal.h>
-#include <stdint.h> // For fixed-width integer types like uint8_t and uint16_t
+#include <math.h>
 
-#define TIMEOUT 10       // Timeout in seconds for waiting for a reply
-#define BUFFER_SIZE 1024 // Size of the buffer to store packets
-
-// ICMP Header for IPv4 (manual definition for compatibility)
+#define TIMEOUT 10 // Timeout in seconds
+#define BUFFER_SIZE 1024
+// Define struct icmphdr for macOS
+#if defined(__APPLE__) || defined(__MACH__)
 struct icmphdr
 {
-    uint8_t type;      // Message type (e.g., Echo Request = 8, Echo Reply = 0)
-    uint8_t code;      // Message code (e.g., 0 for most ICMP types)
-    uint16_t checksum; // Checksum for error detection
+    uint8_t type;      // ICMP message type
+    uint8_t code;      // ICMP message code
+    uint16_t checksum; // ICMP header checksum
     union
-    { // Union for mutual-exclusive fields
+    {
         struct
-        {                      // Echo-specific fields
-            uint16_t id;       // Identifier for matching requests/replies
-            uint16_t sequence; // Sequence number for tracking packets
-        } echo;
-        uint32_t gateway; // Gateway address for Redirect messages
-        struct
-        { // Fragmentation-related fields
-            uint16_t unused_field;
-            uint16_t mtu;
-        } frag;
+        {
+            uint16_t id;
+            uint16_t sequence;
+        } echo; // Echo request/reply
     } un;
 };
+#endif
 
-// Variables to track statistics
-int packets_sent = 0;     // Number of packets sent
-int packets_received = 0; // Number of packets received
-long total_rtt = 0;       // Total round-trip time (RTT)
-long min_rtt = 1000000;   // Minimum RTT
-long max_rtt = 0;         // Maximum RTT
-
-// Function to print ping statistics at the end
-void print_statistics()
+// Define struct iphdr for macOS
+#if defined(__APPLE__) || defined(__MACH__)
+struct iphdr
 {
-    printf("\n--- Ping Statistics ---\n");
-    printf("%d packets transmitted, %d received, %.2f%% packet loss\n",
-           packets_sent, packets_received,
-           ((packets_sent - packets_received) * 100.0) / packets_sent);
+    uint8_t ihl : 4, version : 4; // Header length and IP version
+    uint8_t tos;                  // Type of service
+    uint16_t tot_len;             // Total length
+    uint16_t id;                  // Identification
+    uint16_t frag_off;            // Fragment offset
+    uint8_t ttl;                  // Time to live
+    uint8_t protocol;             // Protocol type
+    uint16_t check;               // Checksum
+    struct in_addr saddr;         // Source address
+    struct in_addr daddr;         // Destination address
+};
+#endif
+int packets_sent = 0;
+int packets_received = 0;
+double total_rtt = 0;
+double min_rtt = 1000000;
+double max_rtt = 0;
+char *address = NULL; // Store the address globally
+
+#include <math.h> // Add this to the top of your file for sqrt()
+
+void print_statistics(const char *address)
+{
+    printf("\n--- %s ping statistics ---\n", address);
+    printf("%d packets transmitted, %d received, time %.3fms\n",
+           packets_sent, packets_received, total_rtt);
+
     if (packets_received > 0)
     {
-        printf("RTT min/avg/max = %ld/%.2f/%ld ms\n",
-               min_rtt, (double)total_rtt / packets_received, max_rtt);
+        // Calculate average RTT
+        double avg_rtt = total_rtt / packets_received;
+
+        // Calculate mean deviation (mdev)
+        double mdev = 0.0;
+        mdev = sqrt(((max_rtt - avg_rtt) * (max_rtt - avg_rtt)) / packets_received);
+
+        // Print RTT statistics
+        printf("rtt min/avg/max/mdev = %.3f/%.3f/%.3f/%.3fms\n",
+               min_rtt, avg_rtt, max_rtt, mdev);
     }
-    exit(0); // End the program
+    exit(0);
 }
 
-// Signal handler to print statistics on Ctrl+C
 void handle_signal(int sig)
 {
     if (sig == SIGINT)
-    { // Check if the signal is Ctrl+C (SIGINT)
-        print_statistics();
+    {
+        print_statistics(address); // Pass the target address
     }
 }
 
-// Function to calculate checksum (used for error detection in ICMP headers)
 unsigned short checksum(void *b, int len)
 {
     unsigned short *buf = b;
     unsigned int sum = 0;
     unsigned short result;
 
-    // Sum up 16-bit words
     for (sum = 0; len > 1; len -= 2)
-        sum += *buf++; // Adds the value at `buf` to `sum`, then increments `buf` to the next address.
-    if (len == 1)      // Add any leftover byte
+        sum += *buf++;
+    if (len == 1)
         sum += *(unsigned char *)buf;
-
-    // Fold 32-bit sum into 16 bits and return
     sum = (sum >> 16) + (sum & 0xFFFF);
     sum += (sum >> 16);
-    result = ~sum; // Invert the sum for checksum
+    result = ~sum;
     return result;
 }
 
-// Function to send an ICMP ping packet
 void send_ping(int sock, struct sockaddr *addr, socklen_t addrlen, int type, int seq_num)
 {
-    char buffer[BUFFER_SIZE];       // Buffer to store the ICMP packet
-    memset(buffer, 0, BUFFER_SIZE); // Clear the buffer
+    char buffer[BUFFER_SIZE];
+    memset(buffer, 0, BUFFER_SIZE);
 
     if (type == 4)
-    { // IPv4 ICMP packet
+    { // IPv4
         struct icmphdr *icmp_hdr = (struct icmphdr *)buffer;
-        icmp_hdr->type = ICMP_ECHO;                                    // Set type to Echo Request
-        icmp_hdr->code = 0;                                            // Code is 0 for Echo Request
-        icmp_hdr->checksum = 0;                                        // Checksum starts at 0
-        icmp_hdr->un.echo.id = getpid();                               // Use process ID as identifier
-        icmp_hdr->un.echo.sequence = seq_num;                          // Set sequence number
-        icmp_hdr->checksum = checksum(buffer, sizeof(struct icmphdr)); // Calculate checksum
+        icmp_hdr->type = ICMP_ECHO;
+        icmp_hdr->code = 0;
+        icmp_hdr->checksum = 0;
+        icmp_hdr->un.echo.id = getpid();
+        icmp_hdr->un.echo.sequence = seq_num;
+        icmp_hdr->checksum = checksum(buffer, sizeof(struct icmphdr));
     }
     else if (type == 6)
-    { // IPv6 ICMP packet
+    { // IPv6
         struct icmp6_hdr *icmp6_hdr = (struct icmp6_hdr *)buffer;
-        icmp6_hdr->icmp6_type = ICMP6_ECHO_REQUEST; // Echo Request for IPv6
-        icmp6_hdr->icmp6_code = 0;                  // Code is 0
-        icmp6_hdr->icmp6_id = getpid();             // Use process ID as identifier
-        icmp6_hdr->icmp6_seq = seq_num;             // Set sequence number
+        icmp6_hdr->icmp6_type = ICMP6_ECHO_REQUEST;
+        icmp6_hdr->icmp6_code = 0;
+        icmp6_hdr->icmp6_id = getpid();
+        icmp6_hdr->icmp6_seq = seq_num;
     }
 
-    // Send the packet using sendto()
     if (sendto(sock, buffer, sizeof(struct icmphdr), 0, addr, addrlen) <= 0)
     {
-        perror("sendto fail"); // Print error if sendto() fails
+        perror("sendto");
     }
     else
     {
-        packets_sent++; // Increment sent packets count
+        packets_sent++;
     }
 }
 
-// Function to receive a ping response
-void receive_ping(int sock, struct timeval *start_time)
+void receive_ping(int sock, struct timeval *start_time, int seq_num, const char *address)
 {
-    char buffer[BUFFER_SIZE]; // Buffer to store the received packet
+    char buffer[BUFFER_SIZE];
     struct sockaddr_storage addr;
     socklen_t addrlen = sizeof(addr);
     struct timeval end_time;
 
-    // Receive the packet using recvfrom()
     if (recvfrom(sock, buffer, BUFFER_SIZE, 0, (struct sockaddr *)&addr, &addrlen) <= 0)
     {
-        perror("recvfrom fail"); // Print error if recvfrom() fails
+        perror("recvfrom");
         return;
     }
 
-    gettimeofday(&end_time, NULL); // Record the time of receiving the response
+    gettimeofday(&end_time, NULL);
 
-    // Calculate the round-trip time (RTT)
-    long rtt = (end_time.tv_sec - start_time->tv_sec) * 1000;
-    rtt += (end_time.tv_usec - start_time->tv_usec) / 1000;
+    // Calculate RTT in milliseconds as a double
+    double rtt = (end_time.tv_sec - start_time->tv_sec) * 1000.0;
+    rtt += (end_time.tv_usec - start_time->tv_usec) / 1000.0;
 
-    packets_received++; // Increment received packets count
-    total_rtt += rtt;   // Add to total RTT
-    if (rtt < min_rtt)  // Update minimum RTT
+    packets_received++;
+    total_rtt += rtt;
+    if (rtt < min_rtt)
         min_rtt = rtt;
-    if (rtt > max_rtt) // Update maximum RTT
+    if (rtt > max_rtt)
         max_rtt = rtt;
 
-    printf("Reply received: RTT=%ld ms\n", rtt); // Print RTT
+    // Extract TTL from IP header (IPv4 case)
+    int ttl = 0;
+    struct iphdr *ip_hdr = (struct iphdr *)buffer;
+    if (ip_hdr->version == 4)
+    {
+        ttl = ip_hdr->ttl;
+    }
+
+    // Print the reply
+    printf("64 bytes from %s: icmp_seq=%d ttl=%d time=%.3fms\n",
+           address, seq_num, ttl, rtt);
 }
 
-// Main function
 int main(int argc, char *argv[])
 {
-    int opt;              // option
-    char *address = NULL; // Target address
-    int type = 0;         // Protocol type (4 for IPv4, 6 for IPv6)
-    int count = -1;       // Number of packets to send (-1 for infinite)
-    int flood = 0;        // Flood mode flag
+    int opt;
+    int type = 0;
+    int count = -1;
+    int flood = 0;
 
-    // Parse command-line arguments using getopt()
     while ((opt = getopt(argc, argv, "a:t:c:f")) != -1)
     {
         switch (opt)
         {
-        case 'a': // Target address
+        case 'a':
             address = optarg;
             break;
-        case 't': // Protocol type
+        case 't':
             type = atoi(optarg);
             break;
-        case 'c': // Count of packets
+        case 'c':
             count = atoi(optarg);
             break;
-        case 'f': // Flood mode
+        case 'f':
             flood = 1;
             break;
         default:
@@ -194,77 +212,76 @@ int main(int argc, char *argv[])
 
     int sock;
     if (type == 4)
-    { // IPv4 socket
+    {
         sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
     }
     else
-    { // IPv6 socket
+    {
         sock = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
     }
 
     if (sock < 0)
-    { // Check if socket creation failed
-        perror("socket creation failed");
+    {
+        perror("socket");
         exit(EXIT_FAILURE);
     }
 
     struct sockaddr_storage dest;
-    memset(&dest, 0, sizeof(dest)); // Clear the destination address
+    memset(&dest, 0, sizeof(dest));
 
     if (type == 4)
-    { // IPv4 address setup
+    {
         struct sockaddr_in *dest4 = (struct sockaddr_in *)&dest;
         dest4->sin_family = AF_INET;
-        if (inet_pton(AF_INET, address, &dest4->sin_addr) <= 0) // cast IPaddr to binary IP
+        if (inet_pton(AF_INET, address, &dest4->sin_addr) <= 0)
         {
-            perror("inet_pton fail");
+            perror("inet_pton");
             exit(EXIT_FAILURE);
         }
     }
     else
-    { // IPv6 address setup
+    {
         struct sockaddr_in6 *dest6 = (struct sockaddr_in6 *)&dest;
         dest6->sin6_family = AF_INET6;
         if (inet_pton(AF_INET6, address, &dest6->sin6_addr) <= 0)
         {
-            perror("inet_pton v6 fail");
+            perror("inet_pton");
             exit(EXIT_FAILURE);
         }
     }
 
-    signal(SIGINT, handle_signal); // Set up signal handler for Ctrl+C
+    signal(SIGINT, handle_signal);
 
     struct timeval start_time;
-
-    // Main loop to send and receive packets
+    printf("Pinging %s with 64 bytes of data:\n", address);
     for (int i = 0; count == -1 || i < count; i++)
     {
-        gettimeofday(&start_time, NULL); // Record the start time
+        gettimeofday(&start_time, NULL);
         send_ping(sock, (struct sockaddr *)&dest, sizeof(dest), type, i);
 
         struct pollfd pfd = {.fd = sock, .events = POLLIN};
-        int ret = poll(&pfd, 1, TIMEOUT * 1000); // Wait for response or timeout
+        int ret = poll(&pfd, 1, TIMEOUT * 1000);
 
         if (ret > 0)
         {
-            receive_ping(sock, &start_time);
+            receive_ping(sock, &start_time, i + 1, address);
         }
         else if (ret == 0)
         {
-            printf("Request timeout for seq=%d\n", i); // Timeout message
+            printf("Request timeout for seq=%d\n", i + 1);
         }
         else
         {
-            perror("poll error"); // Error in poll()
+            perror("poll");
             break;
         }
 
         if (!flood)
         {
-            sleep(1); // Wait 1 second before sending the next packet
+            sleep(1);
         }
     }
 
-    print_statistics(); // Print final statistics
+    print_statistics(address);
     return 0;
 }
