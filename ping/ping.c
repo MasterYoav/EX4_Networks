@@ -1,3 +1,5 @@
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -10,6 +12,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <math.h>
+#include "ping.h"
 
 #define TIMEOUT 10 // Timeout in seconds
 #define BUFFER_SIZE 1024
