@@ -8,11 +8,14 @@
 #include <arpa/inet.h>
 #include <netinet/ip_icmp.h>
 #include <netinet/icmp6.h>
+#include <netinet/ip.h>
+#include <netinet/ip6.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <poll.h>
 #include <signal.h>
 #include <math.h>
+
 
 // Constants
 #define TIMEOUT 10 // Timeout in seconds
